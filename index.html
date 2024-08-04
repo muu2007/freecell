@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no, minimum-scale=1, maximum-scale=1">
-    <title>freecell -v 0.1a(2023-12-23)</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>freecell -v 0.2a(2024-08-02)</title>
 
     <!-- Load custom style sheet -->
-    <link rel="stylesheet" type="text/css" href="theme/love.css">
+	<link rel="stylesheet" type="text/css" href="https://rawgit.com/outboxcraft/beauter/master/beauter.min.css"/>
   </head>
   <body>
     <center>
       <div>
-        <h1>freecell -v 0.1a(2023-12-23)</h1>
+<p id="header_freecell"></p>
         <canvas id="loadingCanvas" oncontextmenu="event.preventDefault()" width="800" height="600"></canvas>
         <canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
       </div>
@@ -104,8 +104,48 @@
     </script>
     <script type="text/javascript" src="game.js"></script>
     <script async type="text/javascript" src="love.js" onload="applicationLoad(this)"></script>
-    <footer>
-      <p>Built with <a href="https://github.com/Davidobot/love.js">love.js</a> <button onclick="goFullScreen();">Go Fullscreen</button><br>Hint: Reload the page if screen is blank</p>
-    </footer>
+
+      <p class=_alignCenter><button class="_small _ripple" onclick="goFullScreen();">Fullscreen</button></p>
+<script type=text/javascript>
+function getParam (param) {
+  const queryString = window.location.search;
+  const urlParams = new URLSearchParams(queryString);
+  const product = urlParams.get(param);
+  return product;
+}
+</script>
+<style>body{color: #1a1a20; background-color: #fffbe1;}</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
+<div class="row">
+<div class="col m12">
+<p>フリーセルになにかしら加えただけのもの</p>
+<h2 class="_nightblue" id="操作方法">操作方法</h2>
+<ul>
+<li>マウス左クリック(またはタップ)で自動移動
+<ul>
+<li>ドラッグで置く場所を指定</li>
+</ul></li>
+<li>右クリック(またはロングタップ)でポップアップメニュー</li>
+</ul>
+<h2 class="_warning" id="download">Download</h2>
+<ul>
+<li>lastest:
+<ul>
+<li><a href="freecell_win64.zip">freecell_win64.zip</a></li>
+<li><a href="freecell.love">freecell.love</a></li>
+</ul></li>
+</ul>
+<h2 class="_danger" id="更新履歴">更新履歴</h2>
+<ul>
+<li>v0.3a
+一番手前になれないカードをなにかわからなくした。ジョーカーは加えない</li>
+<li>v0.2a ジョーカーを加えた</li>
+<li>v0.1a フリーセル</li>
+</ul>
+<h2 class="_success" id="license">License</h2>
+<p>Zlib/Libpng License.</p>
+</div>
+</div>
+
   </body>
-</html>
+</html>

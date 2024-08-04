@@ -1,0 +1,494 @@
+import 'macros' as {$}
+_G.PROJECTNAME, _G.VERSION = $FILE\sub(1,-5), "0.2a(#{$DATE})"
+import 'lib.lume'
+import 'utl' as :pos_in_box, :align, :play, :L
+import 'lib.maid64' -- 改造して高解像度を初期値にした
+-- import 'color' as :sweetie16
+-- import 'lib.gifcat' -- 全部に?入れているので、ここ消すだけで使わなくなる
+import 'input' as :input--, :SoftGamepad, :vec2LURD -- uiより前に読み込む？
+import 'ui' as :Scene, :SelectBox, :Watchdog
+import 'lib.tween'  -- 改造してdelayを可能にした
+import 'js'
+vudu = if DEBUGMODE then require 'lib.vudu' else nil
+inspect = if DEBUGMODE then require 'lib.inspect' else nil
+-- local *
+
+love.window.setTitle(PROJECTNAME .. ' - v' .. VERSION)
+-- love.window.setMode(910--[[800]], 512, if 'Android' == love.system.getOS() then {fullscreen: true} else {resizable: true}) -- レトロ画面をコピーするだけならanti alias不要。gamepad描いているのでmsaaつけた
+love.window.setMode(1280, 720, if 'Android' == love.system.getOS() then {fullscreen: true} else {resizable: true}) -- レトロ画面をコピーするだけならanti alias不要。gamepad描いているのでmsaaつけた
+maid64.setup(1280, 720)
+love.mouse.getPosition = maid64.mouse.getPosition -- プログラム全体としてmaid64の座標系を使うことにする
+love.touch.getPosition0 or= love.touch.getPosition -- 保存
+love.touch.getPosition = (id)-> maid64.transformPosition(love.touch.getPosition0(id))
+Green1, Green2 = {lume.color'#007900'}, {lume.color'#02a846'}
+maid64.clearBG = -> gr.clear(Green1)
+-- os.lang = nil -- i18nを無効
+love.audio.setVolume(.3)
+-- bgm1 = bgm'assets/sounds/052622ineedtogetouttahere_32k.mp3'
+
+
+const Suit, Rank = {'C', 'D', 'H', 'S'}, [i for i=1,13]
+
+class Game
+	@deal = (seed)->
+		rand = ->
+			seed = (214013 * seed + 2531011) % 2147483648
+			math.floor(seed / 2^16)
+		results = [{s, r, s..r} for r in *Rank for s in *Suit] -- 比較や画像のキーに使うため[3]に文字列化したものも持つ
+		-- results[] = {'joker', -1, 'joker1'}
+		-- results[] = {'joker', -1, 'joker2'}
+		for i = #results, 1, -1
+			j = rand() % i + 1
+			results[j], results[i] = results[i], results[j]
+		results
+
+	new: (@id = math.random(32000))=>
+		@freecells = [{} for _= 1, 4] -- 空きスペース。@lua.spec {nil, nil, nil, nil}は意味をなさない
+		@homecells = [{{s, 0, s..0}} for s in *Suit] -- 目的地。数字を計算に使うので0を入れる undoに対応するため配列に
+		@stucks = do
+			deck = @@.deal(@id)
+			results = [{} for _= 1, 8]
+			lume.push(results[(i-1)%8+1], deck[#deck-i+1]) for i=1,#deck
+			results
+		@stucks = [ [{s, r, sr, y>#row-5} for y, {s, r, sr} in ipairs row] for x, row in ipairs @stucks]
+		@undos = {} -- カードの移動アニメーション中は既に移動完了している。よって一手前の状態を表示に利用する
+
+	undo: =>
+		if #@undos > 0
+			{@homecells, @freecells, @stucks} = table.remove(@undos)
+			play'assets/sounds/効果音ラボ/ゲージ回復3.mp3' -- 本当はロジック側に書くべきではないけれど
+
+	iswin: => lume.all(@homecells, (cards)->#cards>13) -- 一番下に計算用の0があるので14枚
+
+	-- カードが取れるか？取れない時はfalseかnilを、取れる場合カードの配列を返す。
+	-- 実際にその場から取り除くのはあらためてplace内で行う
+	-- x: union {nil or 'homecell' or 'freecel' or [1, 8]}
+	cangrub: (x, y)=>
+		switch x
+			when nil then false
+			when 'homecell' then false-- if #@homecells[y] > 1 then lume.last(@homecells[y], 1) else false
+			when 'freecell' then if #@freecells[y] > 0 then {@freecells[y]} else false
+			when 1,2,3,4,5,6,7,8 -- in [1,8]
+				limit = 1 + lume.count(@freecells, (e)->#e==0) + lume.count(@stucks, (e)->#e==0) -- まとめて移動できる数
+				return false if #@stucks[x] - y + 1 > limit
+				for j=y+1,#@stucks[x]
+					c1, c2 = @stucks[x][j-1], @stucks[x][j]
+					return false if c1[2]-c2[2] != 1 or not c1[1]\match(rawget({S:'[HD]',C:'[HD]',H:'[SC]',D:'[SC]'}, c2[1]))
+				lume.slice(@stucks[x], y, #@stucks[x])
+
+	canplace: (cards, x, y)=>
+		switch x
+			when nil then false
+			when 'homecell' then #cards == 1 and cards[1][1] == lume.last(@homecells[y])[1] and cards[1][2] - lume.last(@homecells[y])[2] == 1
+			when 'freecell' then #cards == 1 and 0 == #@freecells[y]
+			when 1,2,3,4,5,6,7,8 then #@stucks[x] == 0 or ( lume.last(@stucks[x])[2] - cards[1][2] == 1 and cards[1][1]\match(rawget({S:'[HD]',C:'[HD]',H:'[SC]',D:'[SC]'}, lume.last(@stucks[x])[1])) )
+
+	-- 実際の移動はココのみ。先に移動できることを調べてから呼ぶ
+	place: (x1, y1, x2, y2)=>
+		@undos[] = {[lume.clone(it) for it in *@homecells], lume.clone(@freecells), [lume.clone(it) for it in *@stucks]}
+		-- cards = @grub(x1, y1)
+		local cards -- cards = nil -- 前方宣言を=nilと書くとLuaLSでneed nil checkと言われる(local cardでは言われない)
+		switch x1
+			when 'homecell' then cards = {table.remove(@homecells[y1])}
+			when 'freecell' then cards, @freecells[y1] = {@freecells[y1]}, {}
+			when 1,2,3,4,5,6,7,8 then cards, @stucks[x1] = lume.slice(@stucks[x1], y1, #@stucks[x1]), lume.first(@stucks[x1], y1-1)
+		-- assert(cards)
+		switch x2
+			when 'homecell' then @homecells[y2][] = cards[1]
+			when 'freecell' then @freecells[y2] = cards[1]
+			when 1,2,3,4,5,6,7,8 then @stucks[x2] = lume.concat(@stucks[x2], cards)
+		limit = 1 + lume.count(@freecells, (e)->#e==0) + lume.count(@stucks, (e)->#e==0) -- まとめて移動できる数
+		@stucks = [ [{s, r, sr, open or y>#row-limit} for y, {s, r, sr, open} in ipairs row] for x, row in ipairs @stucks]
+		cards.pos = {x1, y1}
+		cards, x2, y2 -- animationのための情報を返す
+
+	automove: (x1, y1)=>
+		cards = @cangrub(x1, y1)
+		if not cards then return
+		-- pp 'drag', cards
+		for y = 1, 4
+			if @canplace(cards, 'homecell', y) then return @place(x1, y1, 'homecell', y)
+		for x = 1, 8
+			if x != x1
+				if #@stucks[x] > 0 and @canplace(cards, x, nil) then return @place(x1, y1, x, #@stucks[x]+1) -- y2はanimationに使う
+		for x = 1, 8 -- 0枚の列に置くのは後
+			if x != x1
+				if @canplace(cards, x, nil) then return @place(x1, y1, x, 1) -- y2はanimationに使う?
+		for y = 1, 4
+			if @canplace(cards, 'freecell', y) then return @place(x1, y1, 'freecell', y)
+
+
+PLAYINGCARDS = 'assets/2d/Playing Cards/Playing Cards/PNG-cards-1.3_small'
+-- PLAYINGCARDS = 'assets/2d/Playing Cards/Pixel Fantasy Playing Cards/Playing Cards'
+-- PLAYINGCARDS = 'assets/2d/Playing Cards/PNG/white'
+
+-- local GameScene
+class GameScene extends Scene
+	@CW, @CH, @FY = 110, 160, 40 -- カードのサイズ、重ねるときのY差
+	new: (id)=>
+		@images = setmetatable {s..r, gr.newImage("#{PLAYINGCARDS}/%02d%s.png"\format(r, s)) for r in *Rank for s in *Suit}, -- withに似たsetmetatableの使い方
+			{__index: => gr.newFlyweightImage()} -- 存在しないキーの時、透明のdummyimageを返す
+		@images['joker1'] = gr.newImage("#{PLAYINGCARDS}/joker1.png")
+		-- @images['joker2'] = gr.newImage("#{PLAYINGCARDS}/joker2.png")
+		savedata = if love.filesystem.getInfo(PROJECTNAME..'.save') then lume.deserialize(love.filesystem.read(PROJECTNAME..'.save') or '{}') else {} -- love-js-api-playerでWebでも保存できるようになった(ただしexistsが必要)
+		@setLefty(savedata.lefty) -- 位置の計算も含めて
+		@update_normal = @update -- 保存(drawで現在の状態を知るために使う)
+		-- savedata = lume.deserialize(love.filesystem.read(PROJECTNAME..'.save') or '{tiles = {}}')
+		@newgame(id)
+
+	newgame: (id)=>
+		@game, @time = Game(id), 0
+		play'assets/sounds/効果音ラボ/決定ボタンを押す8.mp3'
+		@draw = nil -- draw_stageclearを解除
+
+	-- quit: => love.filesystem.write(PROJECTNAME..'.save', lume.serialize({tiles: @tiles, score: @score, time: @time})) -- autosave
+	-- focus: (f)=> @quit() if not f -- androidではquitイベントが来ない？ため
+
+	undo: => @game\undo() -- [ ] C-zがAボタンと重なるuでもできるようにしている
+
+	save: =>
+		-- if 'Web' == love.system.getOS() then return
+		love.filesystem.write(PROJECTNAME..'.save', lume.serialize({lefty: @lefty}))
+
+	setLefty: (f) =>
+		@lefty = f
+		@freecellboxes, @homecellboxes, @stuckboxes = do -- マス目状のパズルゲームではないので、あらかじめ位置を計算しておく
+			box = {0,40,maid64.sizeX,maid64.sizeY-40}
+			left = box |> align.left(@@CW)
+			lefts = [align.center(b, @@CW, @@CH) for b in *(left|> align.div_h(4))]
+			right = left.rest |> align.right(@@CW)
+			rights = [align.center(b, @@CW, @@CH) for b in *(right |> align.div_h(4))]
+			centers = [align.center(b, @@CW, box[4]) for b in *(right.rest |> align.div_v(8))]
+			if @lefty then lefts, rights, centers else rights, lefts, centers
+		@save()
+
+	-- 取る時用
+	pos: =>
+		pos = {love.mouse.getPosition()}
+		-- for y, box in ipairs @homecellboxes -- ルール: homecellからは戻せないそうだ
+		-- 	if pos_in_box(pos, box) then return 'homecell', Rank[y]
+		for y, box in ipairs @freecellboxes
+			if pos_in_box(pos, box) then return 'freecell', y
+		for x, box in ipairs @stuckboxes
+			if pos_in_box(pos, box) then
+				for j=#@game.stucks[x],1,-1
+					return x, j if pos_in_box(pos, {box[1], box[2]+(j-1)*@@FY, box[3], @@CH})
+		nil, nil
+
+	-- 置く時用
+	pos2: =>
+		pos = {love.mouse.getPosition()}
+		for y, box in ipairs @homecellboxes
+			if pos_in_box(pos, box) then return 'homecell', Rank[y]
+		for y, box in ipairs @freecellboxes
+			if pos_in_box(pos, box) then return 'freecell', y
+		for x, box in ipairs @stuckboxes
+			if pos_in_box(pos, box) then return x, #@game.stucks[x] + 1
+		nil, nil
+
+	ixy2xy: (x, y, ox=0, oy=0)=>
+		-- pp x, y
+		switch x
+			-- when nil then nil
+			when 'homecell' then {@homecellboxes[y][1]+ox, @homecellboxes[y][2]+oy}
+			when 'freecell' then {@freecellboxes[y][1]+ox, @freecellboxes[y][2]+oy}
+			when 1,2,3,4,5,6,7,8 then {@stuckboxes[x][1]+ox, @stuckboxes[x][2]+@@FY*(y-1)+oy}
+
+	update: (dt)=>
+		@time += dt
+		if @game\iswin() then return @@StageClear()\attach() -- @@Result()\attach()
+		return love.timer.sleep(2/60) if input.idletime>0 --and 'battery' == (love.system.getPowerInfo()) -- 省エネモード
+		if input.Ap() or input.MLBp()
+			x, y = @pos()
+			if @draggingcards := @game\cangrub(x, y)
+				@draggingcards.pos = {x, y} -- dragging中でのみ使う追加情報を配列に同居させちゃう
+				@draggingcards.starttime = love.timer.getTime()
+				@draggingcards.offset = do
+					mx, my = love.mouse.getPosition()
+					@ixy2xy(x, y, -mx, -my)
+				@update = @update_dragging
+		if input.Bp() or input.MRBp() or input.counters.A > 60 or input.counters.MLB > 60
+			@@PopupMenu()\attach()
+
+	update_dragging: (dt)=>
+		@time += dt
+		if input.Ar() or input.MLBr()
+			if love.timer.getTime() - @draggingcards.starttime <= .4 -- クリックとみなす→automoveする
+				if cards, x2, y2 := @game\automove(unpack @draggingcards.pos)
+					@build_tweens(cards, @ixy2xy(cards.pos[1], cards.pos[2]), @ixy2xy(x2, y2))
+				else
+					@update = nil
+			elseif @game\canplace(@draggingcards, @pos2()) -- ２回呼び出している
+				x2, y2 = @pos2()
+				cards, x2, y2 = @game\place(@draggingcards.pos[1], @draggingcards.pos[2], x2, y2)
+				mx, my = love.mouse.getPosition()
+				@build_tweens(cards, {mx+@draggingcards.offset[1], my+@draggingcards.offset[2]}, @ixy2xy(x2, y2))
+			else
+				@update = nil
+
+	update_animation: (dt)=>
+		if input.Ap() or input.MLBp() -- アニメスキップ
+			@update = nil
+			@update(dt) -- pressが有効なうちにpressの動作をさせる
+		else
+			@time += dt
+			input.idletime = 0
+			if lume.all([it\update(dt) for it in *@tweens]) -- アニメ完了
+				n = math.min(unpack [lume.last(cards)[2] for cards in *@game.homecells]) + 1 -- 続けてhomecellsに移動できるものがあれば自動でする
+				for y, card in ipairs @game.freecells
+					if card[2] == n
+						cards, x2, y2 = @game\automove('freecell', y)
+						return @build_tweens(cards, @ixy2xy('freecell', y), @ixy2xy(x2, y2))
+				for x, cards in ipairs @game.stucks
+					if #cards > 0 and lume.last(cards)[2] == n
+						cards, x2, y2 = @game\automove(x, #@game.stucks[x])
+						return @build_tweens(cards, @ixy2xy(x, #@game.stucks[x]), @ixy2xy(x2, y2))
+				@update = nil
+
+	build_tweens: (cards, pos, pos2)=>
+		-- pp cards, pos, pos2
+		duration = if @_static_oldtime then lume.clamp((love.timer.getTime() - @_static_oldtime)*0.8, 0.1, 0.35) else 0.35 -- 連続の場合だんだん速くする static変数のような使い方
+		@_static_oldtime = love.timer.getTime()
+		-- pp duration
+		play'assets/sounds/効果音ラボ/カードを台の上に出す.mp3'
+		@tweens = for i, card in ipairs cards
+			card.pos = {pos[1], pos[2]+@@FY*(i-1)} -- animation中のみ使う追加情報を配列に同居させちゃう
+			with tween.new(duration, card, {pos: {pos2[1], pos2[2]+@@FY*(i-1)}}, 'outCubic')--'outExpo')
+				.clock -= (i-1) * .05 -- 2枚目以降はdelayをさせる
+		@update = @update_animation
+
+	draw: =>
+		gr.clear(Green1)
+		gr.printf(gr.setFont(gr.newFlyweightFont($FONT1, 26)) or gr.setColor(gr.uipalette.text) or "#%05d     %s %d:%02d　"\format(@game.id, L'Time', @time/60, @time%60), 0, 0, maid64.sizeX, 'right')
+		-- gr.print("x y: %2s %2s"\format(@pos()), 10, 0)
+		-- gr.print("x y: %2s %2s"\format(love.mouse.getPosition()), 140, 0)
+		gr.setColor(Green2)
+		gr.roundrect10('fill', box[1], box[2], @@CW, @@CH) for box in *@homecellboxes
+		gr.roundrect10('fill', box[1], box[2], @@CW, @@CH) for box in *@freecellboxes
+		draw_cards = (homecells, freecells, stucks, filter)-> -- filterで描くものを選択(ドラッグ中のカードを描かないために使う)
+			gr.setColor(1,1,1)
+			for y, box in ipairs @homecellboxes
+				for card in *homecells[y]
+					if filter(card)
+						gr.draw(@images[card[3]], box[1], box[2])
+			for y, box in ipairs @freecellboxes
+				card = freecells[y]
+				if #card > 0 and filter(card)
+					gr.draw(@images[card[3]], box[1], box[2])
+			for x, row in ipairs(stucks)
+				for y, card in ipairs(row)
+					if filter(card)
+						gr.draw(@images[if card[4] then card[3] else 'joker1'], @stuckboxes[x][1], @stuckboxes[x][2]+(y-1)*@@FY)
+		switch @update
+			when @update_normal
+				draw_cards(@game.homecells, @game.freecells, @game.stucks, ->true)
+				x, y = @pos()
+				if cards := @game\cangrub(x, y)
+					gr.setColor(gr.uipalette.selected)
+					gr.setLineWidth(3)
+					switch x
+						when 'homecell' then gr.roundrect10('line', unpack @homecellboxes[y])
+						when 'freecell' then gr.roundrect10('line', unpack @freecellboxes[y])
+						when 1,2,3,4,5,6,7,8,9 then gr.roundrect10('line', @stuckboxes[x][1], @stuckboxes[x][2]+(y-1)*@@FY, @stuckboxes[x][3], @@CH+(#cards-1)*@@FY)
+			when @update_dragging
+				draw_cards(@game.homecells, @game.freecells, @game.stucks, (card)-> lume.all(@draggingcards, (c)-> card[3] != c[3]))
+				mx, my = love.mouse.getPosition()
+				gr.draw(@images[card[3]], mx+@draggingcards.offset[1], my+@draggingcards.offset[2]+(j-1)*@@FY) for j, card in ipairs @draggingcards
+				x, y = @pos2()
+				if @game\canplace(@draggingcards, x, y)
+					gr.setColor(gr.uipalette.selected)
+					gr.setLineWidth(3)
+					switch x
+						when 'homecell' then gr.roundrect10('line', unpack @homecellboxes[y])
+						when 'freecell' then gr.roundrect10('line', unpack @freecellboxes[y])
+						when 1,2,3,4,5,6,7,8,9 then gr.roundrect10('line', @stuckboxes[x][1], @stuckboxes[x][2]+(y-1)*@@FY, @stuckboxes[x][3], @@CH)
+			when @update_animation
+				{homecells, freecells, stucks} = lume.last(@game.undos)
+				draw_cards(homecells, freecells, stucks, (card)-> lume.all(@tweens, (t)-> card[3] != t.subject[3])) -- 既に状態は変わっているので、一手前の状態(undos)を使って描画する
+				for {subject: subject} in *@tweens
+					gr.draw(@images[subject[3]], subject.pos[1], subject.pos[2])
+
+		
+
+	class @PopupMenu extends SelectBox
+		new: =>
+			super(SelectBox.buildButtons({L'Undo', L'Reset', L'NewGame', L'ToggleLR(←)', L'Close'}, [{340,50+120*(i-1),600,100} for i = 1, 5], { (-> @detach(@parent\undo())), (-> @detach(@parent\newgame(@parent.game.id))), (-> @detach(@parent\newgame())), (-> @parent\setLefty(not @parent.lefty)), } ))
+		-- detach: => -- 閉じてcommandも実行するならこれがシンプルだが
+		-- 	switch @index
+		-- 		when 1 then @parent\undo()
+		-- 		when 2 then @parent\newgame(@parent.game.id)
+		-- 		when 3 then @parent\newgame()
+		--	super()
+		draw: =>
+			gr.roundrect10(gr.setColor({...gr.uipalette.base,[4]:.6}) or 'fill', 300, 40, 680, 630)
+			gr.setFont(gr.newFlyweightFont($FONT1))
+			gr.printf(gr.setColor(gr.uipalette.base) or PROJECTNAME .. ' - v' .. VERSION, 300,630,670,'right')
+			@buttons[4].text = L'ToggleLR'..'('..(if @parent.lefty then '→' else '←')..')'
+			for id=1, #@buttons
+				gr.roundrect10(gr.setColor(if id == @index then gr.uipalette.selected else gr.uipalette.base2) or 'fill', unpack @buttons[id].box)
+				gr.print_center(gr.setColor(gr.uipalette.text) or @buttons[id].text, @buttons[id].box)
+
+	 -- クリア時アニメーション
+	class @StageClear extends Scene
+		new: =>
+			@update = coroutine.wrap(@_update)
+			-- @positions = {s..r, lume.first(Scene.current.homecellboxes[j], 2) for j, r in ipairs Suit for s in *Rank}
+			@positions = for j, _ in ipairs Suit
+				for i, _ in ipairs Rank
+					with p = lume.first(Scene.current.homecellboxes[j], 2)
+						.tween = tween.new(0.5/13*i, p, {[1]: p[1]+(if Scene.current.lefty then -1 else 1)*i*80+math.random(i+1)-7, [2]: p[2]+math.random(i+7)-10}, 'outCubic')
+						.tween.clock = -0.25*j
+			play'assets/sounds/効果音ラボ/決定ボタンを押す21.mp3'
+
+		_update: (dt)=>
+			for _ = 1, 120
+				for j, _ in ipairs Suit
+					for i, _ in ipairs Rank
+						@positions[j][i].tween\update(dt)
+				_self, dt = coroutine.yield()
+			GameScene.Result()\attach()
+		
+		draw: =>
+			gr.clear(Green1)
+			gr.printf(gr.setFont(gr.newFlyweightFont($FONT1, 26)) or gr.setColor(gr.uipalette.text) or "#%05d     %s %d:%02d　"\format(@parent.game.id, L'Time', @parent.time/60, @parent.time%60), 0, 0, maid64.sizeX, 'right')
+			gr.setColor(Green2)
+			gr.roundrect10('fill', box[1], box[2], GameScene.CW, GameScene.CH) for box in *@parent.homecellboxes
+			gr.roundrect10('fill', box[1], box[2], GameScene.CW, GameScene.CH) for box in *@parent.freecellboxes
+			gr.setColor(1,1,1,1)
+			for j, s in ipairs Suit
+				for i, r in ipairs Rank
+					gr.draw(@parent.images[s..r], unpack @positions[j][i])
+
+	class @Result extends SelectBox
+		new: =>
+			Reset = ->
+				@detach()
+				@parent\detach()
+				@parent.parent\newgame(@parent.parent.game.id)
+			NewGame = ->
+				@detach()
+				@parent\detach()
+				@parent.parent\newgame()
+			-- super(SelectBox.buildButtons({ L'Reset', L'NewGame', L'ToggleLR'}, [{340,50+120*(i),600,100} for i=1,3], { (-> @detach(@parent\newgame(@parent.game.id))), (-> @detach(@parent\newgame())), (-> @parent\setLefty(not @parent.lefty)), })) -- attachしてない段階では@parentは存在しない
+			super(SelectBox.buildButtons({ L'Reset', L'NewGame', L'ToggleLR'}, [{340,50+120*(i),600,100} for i=1,3], { Reset, NewGame, (-> @parent.parent\setLefty(not @parent.parent.lefty)), })) -- attachしてない段階では@parentは存在しない
+			-- play'assets/sounds/効果音ラボ/決定ボタンを押す21.mp3'
+		-- detach: => -- 閉じてcommandも実行するならこれがシンプルだが
+		-- 	switch @index
+		-- 		when 1 then @parent\newgame(@parent.game.id)
+		-- 		when 2 then @parent\newgame()
+		-- 	super()
+		draw: =>
+			gr.roundrect10(gr.setColor({...gr.uipalette.base,[4]:.6}) or 'fill', 300, 40, 680, 610)
+			gr.setFont(gr.newFlyweightFont($FONT1))
+			gr.printf(gr.setColor(gr.uipalette.base) or PROJECTNAME .. ' - v' .. VERSION, 300,610,670,'right')
+			@buttons[3].text = L'ToggleLR'..'('..(if @parent.parent.lefty then '→' else '←')..')'
+			for id=1, #@buttons
+				gr.roundrect10(gr.setColor(if id == @index then gr.uipalette.selected else gr.uipalette.base2) or 'fill', unpack @buttons[id].box)
+				gr.print_center(gr.setColor(gr.uipalette.text) or @buttons[id].text, @buttons[id].box)
+
+-- 省エネモード(アニメが有る場合はupdateでinput.idletime=0をして通常の描画をさせる)
+love.draw = ->
+	self = Scene.current
+	return love.draw1() if @@__name != 'GameScene' or input.idletime < 0.1 --: or 'battery' != (love.system.getPowerInfo())
+	maid64.clearBG()
+	gr.setCanvas(maid64.canvas)
+	-- gr.setFont(gr.newFlyweightFont($FONT1, 26))
+	-- pp gr.getFont()\getHeight()
+	gr.rectangle(gr.setColor(Green1) or 'fill', 1100, 0, maid64.sizeX-1100, 40)--gr.getFont()\getHeight()) -- 時計の部分だけ更新
+	gr.printf(gr.setFont(gr.newFlyweightFont($FONT1, 26)) or gr.setColor(gr.uipalette.text) or "%s %d:%02d　"\format(L'Time', @time/60, @time%60), 0, 0, maid64.sizeX, 'right')
+	maid64.finish()
+	gr.reset()
+
+
+love.load = (_, args)->
+	if 'Web' != love.system.getOS()
+		_G.arg = args
+	else
+		-- getParam = (param)->
+		-- 	with result = {}
+		-- 		JS.newRequest("getParam('#{param}')", (data)-> result[1] = data)
+		-- seed = getParam('seed')
+		-- pp seed
+		-- while not JS.retrieveData(0.001) do love.timer.sleep(0.001)
+		-- uriparams = ''
+		-- JS.newRequest(JS.stringFunc[[return window.location.search;]], ((data)-> uriparams = data), nil, 0.5)
+		-- while not JS.retrieveData(0.001) do love.timer.sleep(0.001)
+		-- print uriparams
+		-- pp seed
+		-- _G.arg[2] = seed[1]
+	-- print args[2]
+	-- print args.seed
+	vudu?.initialize()
+	vudu?.initializeDefaultHotkeys()
+	GameScene()\attach()
+
+	if DEBUGMODE -- hotswap
+		Watchdog{
+			"#{$FILE}": -> Watchdog.transpile("#{$FILE}", 'main.lua')
+			'ui.yue': -> Watchdog.transpile('ui.yue')
+			'input.yue': -> Watchdog.transpile('input.yue')
+			-- 'color.yue': -> Watchdog.transpile('color.yue')
+			'utl.yue': -> Watchdog.transpile('utl.yue')
+			-- 'bigmap.yue': -> Watchdog.transpile('bigmap.yue')
+			-- 'BDF.yue': -> Watchdog.transpile('BDF.yue')
+			-- 'distribute.yue': -> Watchdog.transpile('distribute.yue')
+			'main.lua': -> lume.hotswap('main')
+			'input.lua': -> lume.hotswap('input')
+			'ui.lua': -> lume.hotswap('ui')
+			-- 'color.lua': -> lume.hotswap('color')
+			'utl.lua': -> lume.hotswap('utl')
+			-- 'bigmap.lua': -> lume.hotswap('bigmap')
+			-- 'BDF.lua': -> lume.hotswap('BDF')
+			-- 'distribute.lua': -> lume.hotswap('distribute')
+			}
+	if DEBUGMODE -- build
+		-- os.execute 'rustc -C opt-level=3 --crate-type=cdylib ray.rs' -- android(32bit?)用
+		-- os.execute 'rustc -C opt-level=3 --crate-type=cdylib ray.rs' -- Windows用
+		-- os.execute 'zig build-lib -dynamic -target arm-linux-gnueabi ray.zig' -- android(32bit?)用
+		-- os.execute 'zig build-lib -dynamic -target x86_64-windows ray.zig' -- Windows用
+		-- require('distribute').build({unpack ['assets/2d/Playing Cards/Playing Cards/PNG-cards-1.3_small/%02d%s.png'\format(r, s) for r in *Rank for s in *Suit] })
+		-- love.thread.newThread($yue2lua[[
+		love.thread.newThread([[
+_G.PROJECTNAME, _G.VERSION, description = ...
+local distribute = require('distribute')
+distribute.build({'assets/2d/Playing Cards/Playing Cards/PNG-cards-1.3_small'})
+distribute.modify_index_html(require('lib.os_capture').capture('echo \''..description..'\' | pandoc -f markdown -t html'))
+]])\start PROJECTNAME, VERSION, [[
+<script type='text/javascript'>
+function getParam (param) {
+  const queryString = window.location.search;
+  const urlParams = new URLSearchParams(queryString);
+  const product = urlParams.get(param);
+  return product;
+}
+</script>
+<style>body{color: #1a1a20; background-color: #fffbe1;}</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
+<div class=row><div class="col m12">
+
+フリーセルになにかしら加えただけのもの
+
+## 操作方法{class=_nightblue}
+
+- マウス左クリック(またはタップ)で自動移動
+  - ドラッグで置く場所を指定
+- 右クリック(またはロングタップ)でポップアップメニュー
+
+## Download{class=_warning}
+
+- lastest:
+  - [freecell_win64.zip](freecell_win64.zip)
+  - [freecell.love](freecell.love)
+
+## 更新履歴{class=_danger}
+
+- v0.3a 一番手前になれないカードをなにかわからなくした。ジョーカーは加えない
+- v0.2a ジョーカーを加えた
+- v0.1a フリーセル
+
+## License{class=_success}
+
+Zlib/Libpng License.
+
+</div></div>
+]]
