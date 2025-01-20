@@ -1,16 +1,14 @@
 import 'macros' as {$}
-_G.PROJECTNAME, _G.VERSION = $FILE\sub(1,-5), "0.2a(#{$DATE})"
+_G.PROJECTNAME, _G.VERSION = $FILE\sub(1,-5), "0.3a(#{$DATE})"
+if 'DEBUG' in arg then require 'lib.inspect'
 import 'lib.lume'
 import 'utl' as :pos_in_box, :align, :play, :L
 import 'lib.maid64' -- 改造して高解像度を初期値にした
 -- import 'color' as :sweetie16
 -- import 'lib.gifcat' -- 全部に?入れているので、ここ消すだけで使わなくなる
 import 'input' as :input--, :SoftGamepad, :vec2LURD -- uiより前に読み込む？
-import 'ui' as :Scene, :SelectBox, :Watchdog
+import 'ui' as :Scene, :SelectBox
 import 'lib.tween'  -- 改造してdelayを可能にした
-import 'js'
-vudu = if DEBUGMODE then require 'lib.vudu' else nil
-inspect = if DEBUGMODE then require 'lib.inspect' else nil
 -- local *
 
 love.window.setTitle(PROJECTNAME .. ' - v' .. VERSION)
@@ -135,6 +133,7 @@ class GameScene extends Scene
 		@update_normal = @update -- 保存(drawで現在の状態を知るために使う)
 		-- savedata = lume.deserialize(love.filesystem.read(PROJECTNAME..'.save') or '{tiles = {}}')
 		@newgame(id)
+		@finger2_counter = 0
 
 	newgame: (id)=>
 		@game, @time = Game(id), 0
@@ -197,7 +196,7 @@ class GameScene extends Scene
 	update: (dt)=>
 		@time += dt
 		if @game\iswin() then return @@StageClear()\attach() -- @@Result()\attach()
-		return love.timer.sleep(2/60) if input.idletime>0 --and 'battery' == (love.system.getPowerInfo()) -- 省エネモード
+		-- return --[[love.timer.sleep(2/60)]] if input.idletime>0 --and 'battery' == (love.system.getPowerInfo()) -- 省エネモード
 		if input.Ap() or input.MLBp()
 			x, y = @pos()
 			if @draggingcards := @game\cangrub(x, y)
@@ -209,6 +208,14 @@ class GameScene extends Scene
 				@update = @update_dragging
 		if input.Bp() or input.MRBp() or input.counters.A > 60 or input.counters.MLB > 60
 			@@PopupMenu()\attach()
+		-- ２本指でUndo(長押しで連続Undo)
+		s = love.touch.getTouches()
+		if #s == 2
+			@finger2_counter += 1
+			if @finger2_counter > 50
+				@undo()
+				input.counters.MLB = 0
+				@finger2_counter = 0
 
 	update_dragging: (dt)=>
 		@time += dt
@@ -249,7 +256,6 @@ class GameScene extends Scene
 		-- pp cards, pos, pos2
 		duration = if @_static_oldtime then lume.clamp((love.timer.getTime() - @_static_oldtime)*0.8, 0.1, 0.35) else 0.35 -- 連続の場合だんだん速くする static変数のような使い方
 		@_static_oldtime = love.timer.getTime()
-		-- pp duration
 		play'assets/sounds/効果音ラボ/カードを台の上に出す.mp3'
 		@tweens = for i, card in ipairs cards
 			card.pos = {pos[1], pos[2]+@@FY*(i-1)} -- animation中のみ使う追加情報を配列に同居させちゃう
@@ -257,14 +263,15 @@ class GameScene extends Scene
 				.clock -= (i-1) * .05 -- 2枚目以降はdelayをさせる
 		@update = @update_animation
 
-	draw: =>
+	drawBG: =>
 		gr.clear(Green1)
 		gr.printf(gr.setFont(gr.newFlyweightFont($FONT1, 26)) or gr.setColor(gr.uipalette.text) or "#%05d     %s %d:%02d　"\format(@game.id, L'Time', @time/60, @time%60), 0, 0, maid64.sizeX, 'right')
-		-- gr.print("x y: %2s %2s"\format(@pos()), 10, 0)
-		-- gr.print("x y: %2s %2s"\format(love.mouse.getPosition()), 140, 0)
 		gr.setColor(Green2)
-		gr.roundrect10('fill', box[1], box[2], @@CW, @@CH) for box in *@homecellboxes
-		gr.roundrect10('fill', box[1], box[2], @@CW, @@CH) for box in *@freecellboxes
+		gr.rectangle('fill', box[1], box[2], @@CW, @@CH, 10) for box in *@homecellboxes
+		gr.rectangle('fill', box[1], box[2], @@CW, @@CH, 10) for box in *@freecellboxes
+
+	draw: =>
+		@drawBG()
 		draw_cards = (homecells, freecells, stucks, filter)-> -- filterで描くものを選択(ドラッグ中のカードを描かないために使う)
 			gr.setColor(1,1,1)
 			for y, box in ipairs @homecellboxes
@@ -281,15 +288,16 @@ class GameScene extends Scene
 						gr.draw(@images[if card[4] then card[3] else 'joker1'], @stuckboxes[x][1], @stuckboxes[x][2]+(y-1)*@@FY)
 		switch @update
 			when @update_normal
-				draw_cards(@game.homecells, @game.freecells, @game.stucks, ->true)
+				draw_cards(@game.homecells, @game.freecells, @game.stucks, -> true)
 				x, y = @pos()
-				if cards := @game\cangrub(x, y)
-					gr.setColor(gr.uipalette.selected)
-					gr.setLineWidth(3)
-					switch x
-						when 'homecell' then gr.roundrect10('line', unpack @homecellboxes[y])
-						when 'freecell' then gr.roundrect10('line', unpack @freecellboxes[y])
-						when 1,2,3,4,5,6,7,8,9 then gr.roundrect10('line', @stuckboxes[x][1], @stuckboxes[x][2]+(y-1)*@@FY, @stuckboxes[x][3], @@CH+(#cards-1)*@@FY)
+				if @ == Scene.current -- ポップアップメニュー時にも描画されてしまわないように
+					if cards := @game\cangrub(x, y)
+						gr.setColor(gr.uipalette.selected)
+						gr.setLineWidth(3)
+						switch x
+							when 'homecell' then gr.rectangle_('line', @homecellboxes[y], 10)
+							when 'freecell' then gr.rectangle_('line', @freecellboxes[y], 10)
+							when 1,2,3,4,5,6,7,8,9 then gr.rectangle('line', @stuckboxes[x][1], @stuckboxes[x][2]+(y-1)*@@FY, @stuckboxes[x][3], @@CH+(#cards-1)*@@FY, 10)
 			when @update_dragging
 				draw_cards(@game.homecells, @game.freecells, @game.stucks, (card)-> lume.all(@draggingcards, (c)-> card[3] != c[3]))
 				mx, my = love.mouse.getPosition()
@@ -299,92 +307,84 @@ class GameScene extends Scene
 					gr.setColor(gr.uipalette.selected)
 					gr.setLineWidth(3)
 					switch x
-						when 'homecell' then gr.roundrect10('line', unpack @homecellboxes[y])
-						when 'freecell' then gr.roundrect10('line', unpack @freecellboxes[y])
-						when 1,2,3,4,5,6,7,8,9 then gr.roundrect10('line', @stuckboxes[x][1], @stuckboxes[x][2]+(y-1)*@@FY, @stuckboxes[x][3], @@CH)
+						when 'homecell' then gr.rectangle_('line', @homecellboxes[y], 10)
+						when 'freecell' then gr.rectangle_('line', @freecellboxes[y], 10)
+						when 1,2,3,4,5,6,7,8,9 then gr.rectangle('line', @stuckboxes[x][1], @stuckboxes[x][2]+(y-1)*@@FY, @stuckboxes[x][3], @@CH, 10)
 			when @update_animation
 				{homecells, freecells, stucks} = lume.last(@game.undos)
 				draw_cards(homecells, freecells, stucks, (card)-> lume.all(@tweens, (t)-> card[3] != t.subject[3])) -- 既に状態は変わっているので、一手前の状態(undos)を使って描画する
 				for {subject: subject} in *@tweens
 					gr.draw(@images[subject[3]], subject.pos[1], subject.pos[2])
 
-		
 
-	class @PopupMenu extends SelectBox
-		new: =>
-			super(SelectBox.buildButtons({L'Undo', L'Reset', L'NewGame', L'ToggleLR(←)', L'Close'}, [{340,50+120*(i-1),600,100} for i = 1, 5], { (-> @detach(@parent\undo())), (-> @detach(@parent\newgame(@parent.game.id))), (-> @detach(@parent\newgame())), (-> @parent\setLefty(not @parent.lefty)), } ))
-		-- detach: => -- 閉じてcommandも実行するならこれがシンプルだが
-		-- 	switch @index
-		-- 		when 1 then @parent\undo()
-		-- 		when 2 then @parent\newgame(@parent.game.id)
-		-- 		when 3 then @parent\newgame()
-		--	super()
-		draw: =>
-			gr.roundrect10(gr.setColor({...gr.uipalette.base,[4]:.6}) or 'fill', 300, 40, 680, 630)
-			gr.setFont(gr.newFlyweightFont($FONT1))
-			gr.printf(gr.setColor(gr.uipalette.base) or PROJECTNAME .. ' - v' .. VERSION, 300,630,670,'right')
-			@buttons[4].text = L'ToggleLR'..'('..(if @parent.lefty then '→' else '←')..')'
-			for id=1, #@buttons
-				gr.roundrect10(gr.setColor(if id == @index then gr.uipalette.selected else gr.uipalette.base2) or 'fill', unpack @buttons[id].box)
-				gr.print_center(gr.setColor(gr.uipalette.text) or @buttons[id].text, @buttons[id].box)
+class GameScene.PopupMenu extends SelectBox
+	new: =>
+		super(@@.buildButtons({L'Undo', L'Reset', L'NewGame', L'ToggleLR', L'Close'}, [{340,50+120*(i-1),600,100} for i = 1, 5], { (-> @detach(@parent\undo())), (-> @detach(@parent\newgame(@parent.game.id))), (-> @detach(@parent\newgame())), (-> @parent\setLefty(not @parent.lefty)), } ))
+		@buttons[1].icon = gr.newFlyweightImage('assets/2d/undo40x40.png')
+		if 0 == #Scene.current.game.undos then @buttons[1].disabled, @buttons[2].disabled = true, true
+	-- detach: => -- 閉じてcommandも実行するならこれがシンプルだが
+	-- 	switch @index
+	-- 		when 1 then @parent\undo()
+	-- 		when 2 then @parent\newgame(@parent.game.id)
+	-- 		when 3 then @parent\newgame()
+	--	super()
+	draw: =>
+		gr.rectangle(gr.setColor({...gr.uipalette.text, [4]:.6}) or 'fill', 300, 40, 680, 630, 10)
+		gr.setFont(gr.newFlyweightFont($FONT1))
+		-- gr.printf(gr.setColor(gr.uipalette.base) or PROJECTNAME .. ' - v' .. VERSION, 300,630,670,'right')
+		@buttons[4].text = L'ToggleLR'..(if @parent.lefty then '(→)' else '(←)')
+		super()
 
-	 -- クリア時アニメーション
-	class @StageClear extends Scene
-		new: =>
-			@update = coroutine.wrap(@_update)
-			-- @positions = {s..r, lume.first(Scene.current.homecellboxes[j], 2) for j, r in ipairs Suit for s in *Rank}
-			@positions = for j, _ in ipairs Suit
+ -- クリア時アニメーション
+class GameScene.StageClear extends Scene
+	new: =>
+		@update = coroutine.wrap(@_update)
+		-- @positions = {s..r, lume.first(Scene.current.homecellboxes[j], 2) for j, r in ipairs Suit for s in *Rank}
+		@positions = for j, _ in ipairs Suit
+			for i, _ in ipairs Rank
+				with p = lume.first(Scene.current.homecellboxes[j], 2)
+					.tween = tween.new(0.5/13*i, p, {[1]: p[1]+(if Scene.current.lefty then -1 else 1)*i*80+math.random(i+1)-7, [2]: p[2]+math.random(i+7)-10}, 'outCubic')
+					.tween.clock = -0.25*j
+		play'assets/sounds/効果音ラボ/決定ボタンを押す21.mp3'
+
+	_update: (dt)=>
+		for _ = 1, 120
+			for j, _ in ipairs Suit
 				for i, _ in ipairs Rank
-					with p = lume.first(Scene.current.homecellboxes[j], 2)
-						.tween = tween.new(0.5/13*i, p, {[1]: p[1]+(if Scene.current.lefty then -1 else 1)*i*80+math.random(i+1)-7, [2]: p[2]+math.random(i+7)-10}, 'outCubic')
-						.tween.clock = -0.25*j
-			play'assets/sounds/効果音ラボ/決定ボタンを押す21.mp3'
+					@positions[j][i].tween\update(dt)
+			_self, dt = coroutine.yield()
+		GameScene.Result()\attach()
+	
+	draw: =>
+		@parent\drawBG()
+		gr.setColor(1,1,1,1)
+		for j, s in ipairs Suit
+			for i, r in ipairs Rank
+				gr.draw(@parent.images[s..r], unpack @positions[j][i])
 
-		_update: (dt)=>
-			for _ = 1, 120
-				for j, _ in ipairs Suit
-					for i, _ in ipairs Rank
-						@positions[j][i].tween\update(dt)
-				_self, dt = coroutine.yield()
-			GameScene.Result()\attach()
-		
-		draw: =>
-			gr.clear(Green1)
-			gr.printf(gr.setFont(gr.newFlyweightFont($FONT1, 26)) or gr.setColor(gr.uipalette.text) or "#%05d     %s %d:%02d　"\format(@parent.game.id, L'Time', @parent.time/60, @parent.time%60), 0, 0, maid64.sizeX, 'right')
-			gr.setColor(Green2)
-			gr.roundrect10('fill', box[1], box[2], GameScene.CW, GameScene.CH) for box in *@parent.homecellboxes
-			gr.roundrect10('fill', box[1], box[2], GameScene.CW, GameScene.CH) for box in *@parent.freecellboxes
-			gr.setColor(1,1,1,1)
-			for j, s in ipairs Suit
-				for i, r in ipairs Rank
-					gr.draw(@parent.images[s..r], unpack @positions[j][i])
-
-	class @Result extends SelectBox
-		new: =>
-			Reset = ->
-				@detach()
-				@parent\detach()
-				@parent.parent\newgame(@parent.parent.game.id)
-			NewGame = ->
-				@detach()
-				@parent\detach()
-				@parent.parent\newgame()
-			-- super(SelectBox.buildButtons({ L'Reset', L'NewGame', L'ToggleLR'}, [{340,50+120*(i),600,100} for i=1,3], { (-> @detach(@parent\newgame(@parent.game.id))), (-> @detach(@parent\newgame())), (-> @parent\setLefty(not @parent.lefty)), })) -- attachしてない段階では@parentは存在しない
-			super(SelectBox.buildButtons({ L'Reset', L'NewGame', L'ToggleLR'}, [{340,50+120*(i),600,100} for i=1,3], { Reset, NewGame, (-> @parent.parent\setLefty(not @parent.parent.lefty)), })) -- attachしてない段階では@parentは存在しない
-			-- play'assets/sounds/効果音ラボ/決定ボタンを押す21.mp3'
-		-- detach: => -- 閉じてcommandも実行するならこれがシンプルだが
-		-- 	switch @index
-		-- 		when 1 then @parent\newgame(@parent.game.id)
-		-- 		when 2 then @parent\newgame()
-		-- 	super()
-		draw: =>
-			gr.roundrect10(gr.setColor({...gr.uipalette.base,[4]:.6}) or 'fill', 300, 40, 680, 610)
-			gr.setFont(gr.newFlyweightFont($FONT1))
-			gr.printf(gr.setColor(gr.uipalette.base) or PROJECTNAME .. ' - v' .. VERSION, 300,610,670,'right')
-			@buttons[3].text = L'ToggleLR'..'('..(if @parent.parent.lefty then '→' else '←')..')'
-			for id=1, #@buttons
-				gr.roundrect10(gr.setColor(if id == @index then gr.uipalette.selected else gr.uipalette.base2) or 'fill', unpack @buttons[id].box)
-				gr.print_center(gr.setColor(gr.uipalette.text) or @buttons[id].text, @buttons[id].box)
+class GameScene.Result extends SelectBox
+	new: =>
+		Reset = ->
+			@detach()
+			@parent\detach()
+			@parent.parent\newgame(@parent.parent.game.id)
+		NewGame = ->
+			@detach()
+			@parent\detach()
+			@parent.parent\newgame()
+		super(@@.buildButtons({ L'Reset', L'NewGame', L'ToggleLR'}, [{340,50+120*(i),600,100} for i=1,3], { Reset, NewGame, (-> @parent.parent\setLefty(not @parent.parent.lefty)), })) -- attachしてない段階では@parentは存在しない
+		-- play'assets/sounds/効果音ラボ/決定ボタンを押す21.mp3'
+	-- detach: => -- 閉じてcommandも実行するならこれがシンプルだが
+	-- 	switch @index
+	-- 		when 1 then @parent\newgame(@parent.game.id)
+	-- 		when 2 then @parent\newgame()
+	-- 	super()
+	draw: =>
+		gr.rectangle(gr.setColor({...gr.uipalette.text, [4]:.6}) or 'fill', 300, 40, 680, 610, 10)
+		gr.setFont(gr.newFlyweightFont($FONT1))
+		-- gr.printf(gr.setColor(gr.uipalette.base) or PROJECTNAME .. ' - v' .. VERSION, 300,610,670,'right')
+		@buttons[3].text = L'ToggleLR'..(if @parent.parent.lefty then '(→)' else '(←)')
+		super()
 
 -- 省エネモード(アニメが有る場合はupdateでinput.idletime=0をして通常の描画をさせる)
 love.draw = ->
@@ -394,35 +394,36 @@ love.draw = ->
 	gr.setCanvas(maid64.canvas)
 	-- gr.setFont(gr.newFlyweightFont($FONT1, 26))
 	-- pp gr.getFont()\getHeight()
-	gr.rectangle(gr.setColor(Green1) or 'fill', 1100, 0, maid64.sizeX-1100, 40)--gr.getFont()\getHeight()) -- 時計の部分だけ更新
+	gr.rectangle(gr.setColor(Green1) or 'fill', 1150, 0, maid64.sizeX-1150, 40)--gr.getFont()\getHeight()) -- 時計の部分だけ更新
 	gr.printf(gr.setFont(gr.newFlyweightFont($FONT1, 26)) or gr.setColor(gr.uipalette.text) or "%s %d:%02d　"\format(L'Time', @time/60, @time%60), 0, 0, maid64.sizeX, 'right')
 	maid64.finish()
 	gr.reset()
 
 
 love.load = (_, args)->
-	if 'Web' != love.system.getOS()
-		_G.arg = args
-	else
-		-- getParam = (param)->
-		-- 	with result = {}
-		-- 		JS.newRequest("getParam('#{param}')", (data)-> result[1] = data)
-		-- seed = getParam('seed')
-		-- pp seed
-		-- while not JS.retrieveData(0.001) do love.timer.sleep(0.001)
-		-- uriparams = ''
-		-- JS.newRequest(JS.stringFunc[[return window.location.search;]], ((data)-> uriparams = data), nil, 0.5)
-		-- while not JS.retrieveData(0.001) do love.timer.sleep(0.001)
-		-- print uriparams
-		-- pp seed
-		-- _G.arg[2] = seed[1]
+	-- if 'Web' == love.system.getOS()
+	-- 	getParam = (param)->
+	-- 		with result = {}
+	-- 			JS.newRequest("getParam('#{param}')", (data)-> result[1] = data)
+	-- 	seed = getParam('seed')
+	-- 	pp seed
+	-- 	while not JS.retrieveData(0.001) do love.timer.sleep(0.001)
+	-- 	uriparams = ''
+	-- 	JS.newRequest(JS.stringFunc[[return window.location.search;]], ((data)-> uriparams = data), nil, 0.5)
+	-- 	while not JS.retrieveData(0.001) do love.timer.sleep(0.001)
+	-- 	print uriparams
+	-- 	pp seed
+	-- 	_G.arg[2] = seed[1]
 	-- print args[2]
 	-- print args.seed
-	vudu?.initialize()
-	vudu?.initializeDefaultHotkeys()
+	if 'DEBUG' in arg
+		vudu = with require 'lib.vudu'
+			.initialize()
+			.initializeDefaultHotkeys()
 	GameScene()\attach()
 
-	if DEBUGMODE -- hotswap
+	if 'DEBUG' in arg -- hotswap
+		Watchdog = package.loaded['ui'].Watchdog
 		Watchdog{
 			"#{$FILE}": -> Watchdog.transpile("#{$FILE}", 'main.lua')
 			'ui.yue': -> Watchdog.transpile('ui.yue')
@@ -441,7 +442,7 @@ love.load = (_, args)->
 			-- 'BDF.lua': -> lume.hotswap('BDF')
 			-- 'distribute.lua': -> lume.hotswap('distribute')
 			}
-	if DEBUGMODE -- build
+	if 'DISTRIBUTE' in arg -- build
 		-- os.execute 'rustc -C opt-level=3 --crate-type=cdylib ray.rs' -- android(32bit?)用
 		-- os.execute 'rustc -C opt-level=3 --crate-type=cdylib ray.rs' -- Windows用
 		-- os.execute 'zig build-lib -dynamic -target arm-linux-gnueabi ray.zig' -- android(32bit?)用
@@ -452,6 +453,7 @@ love.load = (_, args)->
 _G.PROJECTNAME, _G.VERSION, description = ...
 local distribute = require('distribute')
 distribute.build({'assets/2d/Playing Cards/Playing Cards/PNG-cards-1.3_small'})
+os.execute("cp freecell.yue  freecell/.")
 distribute.modify_index_html(require('lib.os_capture').capture('echo \''..description..'\' | pandoc -f markdown -t html'))
 ]])\start PROJECTNAME, VERSION, [[
 <script type='text/javascript'>
@@ -473,6 +475,7 @@ function getParam (param) {
 - マウス左クリック(またはタップ)で自動移動
   - ドラッグで置く場所を指定
 - 右クリック(またはロングタップ)でポップアップメニュー
+- Undo: u key or two-finger tap
 
 ## Download{class=_warning}
 
